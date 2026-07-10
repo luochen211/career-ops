@@ -6,7 +6,7 @@
 **Archetype:** Full-Stack Developer + Web Front-End / Mobile Cross-Platform  
 **Score:** 3.6/5  
 **Legitimacy:** Proceed with Caution  
-**PDF:** pending — not generated because employer and application details are unconfirmed
+**PDF:** output/cv-cui-dong-remote-app-web-intern-2026-07-10.pdf
 
 ## Machine Summary
 

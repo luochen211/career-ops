@@ -2,7 +2,7 @@
 
 | # | Date | Company | Role | Score | Status | PDF | Report | Notes |
 |---|------|---------|------|-------|--------|-----|--------|-------|
-| 12 | 2026-07-10 | 未知公司 | 远程软件开发实习生（APP/Web方向） | 3.6/5 | Evaluated | ❌ | [12](../reports/012-unknown-company-remote-software-development-intern-app-web-2026-07-10.md) | 条件性投递：Vue/React、Node/FastAPI/Java、Flutter、小程序、订单系统和部署高度匹配；但公司主体、薪资、工时、合同与转正条件均未说明，先核实再投入。 |
+| 12 | 2026-07-10 | 未知公司 | 远程软件开发实习生（APP/Web方向） | 3.6/5 | Evaluated | ✅ | [12](../reports/012-unknown-company-remote-software-development-intern-app-web-2026-07-10.md) | 条件性投递：Vue/React、Node/FastAPI/Java、Flutter、小程序、订单系统和部署高度匹配；但公司主体、薪资、工时、合同与转正条件均未说明，先核实再投入。 |
 | 11 | 2026-07-04 | 未知公司 | AI 应用工程师实习生 | 4.6/5 | Evaluated | ✅ | [011](../reports/011-unknown-company-ai-application-engineer-intern-2026-07-04.md) | 强烈建议投递：本科大二在读正好匹配实习筛选；career-ops、AI/Agent/LLM 开源贡献、全栈交付和 AI coding workflow 高度贴合，面试前补 Notion/Sheets/Lark + RAG 小 demo。 |
 | 10 | 2026-07-04 | Capybara Labs | React Engineer | 3.7/5 | Evaluated | ✅ | [010](../reports/010-capybara-labs-react-engineer-2026-07-04.md) | 谨慎投递：React/TypeScript、Flutter IM、小程序、AI 编程工具匹配；核心缺口是 React Native 生产经验、RN 动效/手势/滚动优化和 App Store/Android 上架。 |
 | 9 | 2026-07-04 | 未知外资企业 | Agent 架构师 | 4.2/5 | Evaluated | ✅ | [009](../reports/009-unknown-foreign-company-agent-architect-2026-07-04.md) | 值得投：AI Agent 产品工程化、全栈交付、业务效率工具和 career-ops workflow 高匹配；主要缺口是 Go/PHP 偏好、SaaS API 集成案例和架构师资深度预期。 |
