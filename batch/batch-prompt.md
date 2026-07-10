@@ -135,6 +135,49 @@ Sección de **gaps** con estrategia de mitigación para cada uno:
 
 Usar WebSearch para salarios actuales (Glassdoor, Levels.fyi, Blind), reputación comp de la empresa, tendencia demanda. Tabla con datos y fuentes citadas. Si no hay datos, decirlo.
 
+Antes de interpretar cualquier salario, clasifica el **tipo de empresa / hiring entity**. El salario público es una señal, no una promesa contractual.
+
+**Company type classification (required):**
+
+| Company type | Typical comp reliability | Signals |
+|--------------|--------------------------|---------|
+| Public big tech / mature tech | High to medium | Public company, structured levels, large engineering org, repeatable hiring process |
+| Growth-stage startup / VC-backed startup | Medium | Funded startup, competitive hiring market, may mix base + equity + bonus |
+| Early-stage startup / pre-revenue startup | Medium to low | Small team, vague role scope, equity-heavy promises, unclear bands |
+| Enterprise / traditional corporate | Medium | Formal HR process, stable base, slower bands, bonus may be discretionary |
+| Agency / outsourcing / consulting vendor | Medium to low | Client allocation, project-based work, billability pressure, variable bonus |
+| Local SMB / service business | Low | Small company, broad role, informal HR, "comprehensive salary" language |
+| Sales / commission-heavy org | Low unless base is explicit | OTE, uncapped commission, performance bonus, target-based pay |
+| Recruiter / staffing listing | Low to medium | Third-party posting, range may reflect client budget rather than offer terms |
+| Government / academic / nonprofit | Medium to high | Published grades/bands, but lower market competitiveness |
+| Open-source community / education community | Medium to low | Community-led org, foundation/association sponsor, campus/community operations, unclear employment entity |
+
+If the brand differs from the legal employer or posting entity, classify the **actual contract / hiring entity** first and mention the brand relationship separately. If the company type is uncertain, mark it as `Unknown` and default compensation reliability to the conservative canonical tier: `Low` until evidence improves it.
+
+**Compensation reliability (required):**
+
+First check whether the JD itself states a salary figure. If no advertised number exists, collapse this section to exactly two concise lines after the demand trend:
+
+- **Company type:** {category or `Unknown`} — {confidence + one evidence phrase}
+- **Compensation reliability:** {tier} — no advertised salary figure; skip component split, detailed market rows, and HR verification questions
+
+When an advertised salary figure exists, split compensation into:
+- **Advertised range:** the JD's own salary/range, copied verbatim
+- **Likely guaranteed base:** conservative estimate of fixed contract salary
+- **Variable / conditional cash components:** bonus, commission, allowance, attendance bonus, KPI bonus, overtime, 13th salary, sign-on, or other cash tied to conditions
+- **Expected stable cash:** what is likely recurring and reliable in cash, before tax unless local data supports a net estimate; exclude benefits
+- **Non-cash benefits:** equity, insurance, pension, meals, transport, wellness, learning budget, equipment, or other benefits that are not guaranteed cash
+
+Reliability tier:
+- **High:** salary is stated as base or backed by structured public bands / multiple consistent sources
+- **Medium:** range is plausible but components are not fully separated
+- **Low:** public number likely includes variable, attendance, commission, subsidy, or "up to" components
+- **Unknown:** no usable salary data
+
+Treat "comprehensive salary", "total package", "up to", "OTE", "uncapped", "allowances included", "attendance bonus", "KPI bonus", "base + variable", "base + commission", and unusually wide ranges as low-reliability unless fixed base is separated.
+
+When a salary figure exists, include 3-6 HR verification questions tailored to the company type. Do not present advertised compensation as real take-home pay unless the source explicitly supports that interpretation.
+
 Score de comp (1-5): 5=top quartile, 4=above market, 3=median, 2=slightly below, 1=well below.
 
 #### Bloque E — Plan de Personalización
@@ -171,6 +214,7 @@ Analyze posting signals to assess whether this is a real, active opening.
 **Assessment:** Apply the same three tiers (High Confidence / Proceed with Caution / Suspicious), weighting available signals more heavily. If insufficient signals are available to make a determination, default to "Proceed with Caution" with a note about limited data.
 
 #### Score Global
+Read `modes/_custom.md` → Scoring Rules, if it exists, and apply its override here. Default (if absent or silent): calculate global score based on dimension scores below.
 
 | Dimensión | Score |
 |-----------|-------|
@@ -201,12 +245,16 @@ top_strengths:
 risk_level: "{Low | Medium | High}"
 confidence: "{Low | Medium | High}"
 next_action: "{one concrete next step}"
+via: {agency/recruiter firm as a quoted string, or null for direct applications}
+company_confidential: {true when the end employer is unknown (company is "?"), else false}
+advertised_comp: {verbatim JD salary/range as a quoted string (e.g. "80-90k EUR"), or null when the JD states nothing}
 ```
 
 Rules:
 - Use `[]` for `hard_stops`, `soft_gaps`, or `top_strengths` when empty.
 - `score` is numeric only, without `/5`.
 - `final_decision` must reflect the full evaluation, not only the CV match.
+- `advertised_comp` is the JD's **own** figure, verbatim; `null` when the JD states nothing — never estimate it and never substitute researched market data (Block D research stays in Block D). Batch workers never write `data/salary-observations.tsv` — the report itself is the advertised observation (`salary-gap.mjs` reads it).
 - Do not invent missing data. If confidence is limited, set `confidence: "Low"` and explain the limitation in the human-readable sections.
 
 ### Paso 3 — Guardar Report .md
@@ -251,6 +299,9 @@ top_strengths:
 risk_level: "{Low | Medium | High}"
 confidence: "{Low | Medium | High}"
 next_action: "{one concrete next step}"
+via: {agency/recruiter firm as a quoted string, or null for direct applications}
+company_confidential: {true when the end employer is unknown (company is "?"), else false}
+advertised_comp: {verbatim JD salary/range as a quoted string (e.g. "80-90k EUR"), or null when the JD states nothing}
 ```
 
 ## A) Resumen del Rol
@@ -397,6 +448,8 @@ Formato TSV (una sola línea, sin header, 9 columnas tab-separated):
 | 9 | notes | string | `APPLY HIGH...` | Resumen 1 frase |
 
 **IMPORTANTE:** El orden TSV tiene status ANTES de score (col 5→status, col 6→score). En applications.md el orden es inverso (col 5→score, col 6→status). merge-tracker.mjs maneja la conversión.
+
+**Campos opcionales (col ≥ 10):** si la oferta llega vía agencia/recruiter (#1596), añade un campo etiquetado `via={Agencia}` (ej. `via=Hays`) — NUNCA posicional, la etiqueta es obligatoria. Un campo extra SIN etiqueta se interpreta como la location legacy. Si el empleador final es desconocido, usa `?` como company y añade el descriptor en notes (ej. `fintech, Leeds`). merge-tracker.mjs rechaza filas con extras ambiguos (dos campos sin etiqueta, o dos `via=`).
 
 **Estados canónicos válidos:** `Evaluada`, `Aplicado`, `Respondido`, `Entrevista`, `Oferta`, `Rechazado`, `Descartado`, `NO APLICAR`
 

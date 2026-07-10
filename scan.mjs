@@ -30,14 +30,25 @@
  *   node scan.mjs --verify --throttle=8000     # custom base gap in ms (waits base..2*base)
  */
 
-import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, readdirSync } from 'fs';
+import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync } from 'fs';
 import { pathToFileURL, fileURLToPath } from 'url';
 import path from 'path';
 import yaml from 'js-yaml';
 
 import { makeHttpCtx } from './providers/_http.mjs';
 import { buildTrustValidator } from './providers/_trust-validator.mjs';
+import { loadProviders, resolveProvider } from './providers/_registry.mjs';
 import { mergeProviderPlugins } from './plugins/_engine.mjs';
+import { classifyFetchError } from './verify-portals.mjs';
+import { fingerprintText, findCrossListings } from './fingerprint-core.mjs';
+import { resolveColumns, parseTrackerRow } from './tracker-parse.mjs';
+
+try {
+  const { config } = await import('dotenv');
+  config();
+} catch {
+  // dotenv is optional — fall back to process.env if not installed
+}
 
 const parseYaml = yaml.load;
 
@@ -55,72 +66,9 @@ mkdirSync('data', { recursive: true });
 
 const CONCURRENCY = 10;
 
-// ── Provider loading ────────────────────────────────────────────────
-
-async function loadProviders(dir) {
-  const providers = new Map();
-  if (!existsSync(dir)) return providers;
-  // Alphabetical order so detect() priority is deterministic across machines.
-  const entries = readdirSync(dir)
-    .filter(f => f.endsWith('.mjs') && !f.startsWith('_'))
-    .sort();
-  for (const file of entries) {
-    const full = path.join(dir, file);
-    let mod;
-    try {
-      mod = await import(pathToFileURL(full).href);
-    } catch (err) {
-      console.error(`⚠️  ${file}: failed to load — ${err.message}`);
-      continue;
-    }
-    const p = mod.default;
-    if (!p || typeof p.fetch !== 'function' || !p.id) {
-      console.error(`⚠️  ${file}: skipping — default export must be { id, fetch }`);
-      continue;
-    }
-    if (providers.has(p.id)) {
-      console.error(`⚠️  ${file}: duplicate provider id "${p.id}" — keeping first`);
-      continue;
-    }
-    providers.set(p.id, p);
-  }
-  return providers;
-}
-
-// Resolve which provider handles a tracked_companies entry.
-// 1. Explicit `provider:` field wins (skips detect()).
-// 2. local-parser when parser.command + script are configured (before API detect).
-// 3. Otherwise each provider's detect() runs in load order; first hit wins.
-function resolveProvider(entry, providers, { skipIds = [] } = {}) {
-  if (entry.provider) {
-    const p = providers.get(entry.provider);
-    if (!p) return { error: `unknown provider: ${entry.provider}` };
-    return { provider: p };
-  }
-
-  const localParser = providers.get('local-parser');
-  if (localParser && !skipIds.includes('local-parser')) {
-    try {
-      const hit = localParser.detect?.(entry);
-      if (hit) return { provider: localParser };
-    } catch (err) {
-      console.error(`⚠️  local-parser: detect() threw for "${entry.name}" — ${err.message}`);
-    }
-  }
-
-  for (const p of providers.values()) {
-    if (skipIds.includes(p.id)) continue;
-    let hit;
-    try {
-      hit = p.detect?.(entry);
-    } catch (err) {
-      console.error(`⚠️  ${p.id}: detect() threw for "${entry.name}" — ${err.message}`);
-      continue;
-    }
-    if (hit) return { provider: p };
-  }
-  return null;
-}
+// Provider loading + routing live in providers/_registry.mjs so the portal
+// health check (verify-portals.mjs) can reuse the exact same layer without
+// importing this module.
 
 // ── Title filter ────────────────────────────────────────────────────
 
@@ -154,6 +102,32 @@ export function buildTitleFilter(titleFilter) {
     const hasNegative = negative.some(m => m(lower));
     return hasPositive && !hasNegative;
   };
+}
+
+// Compiled-matcher cache for matchedTitleKeywords(), keyed by the
+// `title_filter.positive` array reference. The scan loop calls this once per
+// job with the same titleFilter config object, so caching avoids recompiling
+// every keyword (compileKeyword()) on every single job.
+const compiledPositiveCache = new WeakMap();
+
+function compiledPositiveMatchers(positiveList) {
+  if (compiledPositiveCache.has(positiveList)) return compiledPositiveCache.get(positiveList);
+  const compiled = positiveList
+    .filter(k => typeof k === 'string' && k.trim().length > 0)
+    .map(k => ({ raw: k, match: compileKeyword(k.trim().toLowerCase()) }));
+  compiledPositiveCache.set(positiveList, compiled);
+  return compiled;
+}
+
+// Returns the raw (as-written in portals.yml) `title_filter.positive` keywords
+// that matched a given title — used to scope `content_filter.by_title_keyword`
+// overrides to only the categories that opted into a stricter content check.
+export function matchedTitleKeywords(title, titleFilter) {
+  const raw = Array.isArray(titleFilter?.positive) ? titleFilter.positive : [];
+  const lower = (title || '').toLowerCase();
+  return compiledPositiveMatchers(raw)
+    .filter(({ match }) => match(lower))
+    .map(({ raw: kw }) => kw);
 }
 
 // ── Location filter ─────────────────────────────────────────────────
@@ -199,6 +173,22 @@ export function buildLocationFilter(locationFilter) {
   };
 }
 
+// ── Posting-age filter ──────────────────────────────────────────────
+// Optional opt-in. If `max_posting_age_days` is absent (or not a positive
+// integer) in portals.yml, every offer passes. An offer is skipped only when
+// the provider supplied a postedAt (epoch ms) AND it is older than N days.
+// Offers with no date always pass — same "don't penalize missing data"
+// convention as the location filter. `now` is injectable for deterministic tests.
+export function buildPostingAgeFilter(maxAgeDays, now = Date.now()) {
+  const max = Number(maxAgeDays);
+  if (!Number.isInteger(max) || max <= 0) return () => true;
+  const cutoff = now - max * 24 * 60 * 60 * 1000; // N days in ms, subtracted from now
+  return (postedAt) => {
+    if (typeof postedAt !== 'number' || !Number.isFinite(postedAt)) return true;
+    return postedAt >= cutoff;
+  };
+}
+
 // ── Content filter ──────────────────────────────────────────────────
 // Optional. If `content_filter` is absent from portals.yml, all jobs pass.
 // Filters on the job DESCRIPTION text to separate same-titled roles with
@@ -211,6 +201,16 @@ export function buildLocationFilter(locationFilter) {
 //   - `positive` empty → pass (already cleared negatives)
 //   - `positive` non-empty → at least one keyword must be present
 //
+// `content_filter.by_title_keyword` (optional): scopes a stricter positive/
+// negative pair to only the jobs whose title matched a specific
+// `title_filter.positive` keyword, so e.g. an "AI Engineer" title-match can
+// require the description to actually mention a concrete AI tool, without
+// that requirement leaking onto unrelated categories like "Instructional
+// Designer". When one or more of a job's matched title keywords has an
+// override, the overrides govern (any override passing is enough); the
+// global `positive`/`negative` pair is the fallback for jobs whose matched
+// keyword(s) have no override entry.
+//
 // Provider support: only providers whose list API ships the description for
 // free (no extra per-job request, which would break the zero-token design)
 // populate `job.description`. Lever (`descriptionPlain`) does today; others
@@ -221,9 +221,34 @@ export function buildContentFilter(contentFilter) {
   const positive = normalizeKeywordList(contentFilter.positive);
   const negative = normalizeKeywordList(contentFilter.negative);
 
-  return (description) => {
+  const byTitleKeyword = new Map();
+  if (contentFilter.by_title_keyword && typeof contentFilter.by_title_keyword === 'object' && !Array.isArray(contentFilter.by_title_keyword)) {
+    for (const [kw, rule] of Object.entries(contentFilter.by_title_keyword)) {
+      if (typeof kw !== 'string' || !kw.trim()) continue;
+      byTitleKeyword.set(kw.trim().toLowerCase(), {
+        positive: normalizeKeywordList(rule?.positive),
+        negative: normalizeKeywordList(rule?.negative),
+      });
+    }
+  }
+
+  return (description, matchedKeywords = []) => {
     if (typeof description !== 'string' || description.trim() === '') return true;
     const lower = description.toLowerCase();
+
+    const overrides = matchedKeywords
+      .filter(k => typeof k === 'string')
+      .map(k => byTitleKeyword.get(k.trim().toLowerCase()))
+      .filter(Boolean);
+
+    if (overrides.length > 0) {
+      return overrides.some(rule => {
+        if (rule.negative.length > 0 && rule.negative.some(k => lower.includes(k))) return false;
+        if (rule.positive.length === 0) return true;
+        return rule.positive.some(k => lower.includes(k));
+      });
+    }
+
     if (negative.length > 0 && negative.some(k => lower.includes(k))) return false;
     if (positive.length === 0) return true;
     return positive.some(k => lower.includes(k));
@@ -324,7 +349,7 @@ export function loadReApplyWindows(profilePath = PROFILE_PATH) {
       const lastApplyDate = win.last_apply_date;
       if (typeof lastApplyDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(lastApplyDate)) continue;
       if (isNaN(Date.parse(lastApplyDate))) continue;
-      
+
       const sameRoleDays = win.same_role_days;
       if (sameRoleDays !== undefined && (!Number.isInteger(sameRoleDays) || sameRoleDays < 0)) continue;
 
@@ -556,17 +581,20 @@ export function loadSeenUrls(policy = {}) {
   return { seen, recheckEligible };
 }
 
-function loadSeenCompanyRoles() {
+export function loadSeenCompanyRoles(appsPath = APPLICATIONS_PATH) {
   const seen = new Set();
-  if (existsSync(APPLICATIONS_PATH)) {
-    const text = readFileSync(APPLICATIONS_PATH, 'utf-8');
-    // Parse markdown table rows: | # | Date | Company | Role | ...
-    for (const match of text.matchAll(/\|[^|]+\|[^|]+\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|/g)) {
-      const company = match[1].trim().toLowerCase();
-      const role = match[2].trim().toLowerCase();
-      if (company && role && company !== 'company') {
-        seen.add(`${company}::${role}`);
-      }
+  if (existsSync(appsPath)) {
+    // Header-aware parse (tracker-parse.mjs, #954) — the old positional regex
+    // captured the wrong cells on customized layouts (e.g. with a Location
+    // column), so the seen-set keyed on garbage and dedup misfired.
+    const lines = readFileSync(appsPath, 'utf-8').split('\n');
+    const colmap = resolveColumns(lines);
+    for (const line of lines) {
+      const row = parseTrackerRow(line, colmap);
+      if (!row) continue;
+      const company = row.company.trim().toLowerCase();
+      const role = row.role.trim().toLowerCase();
+      if (company && role) seen.add(`${company}::${role}`);
     }
   }
   return seen;
@@ -637,10 +665,27 @@ export function formatPipelineOffer(offer) {
   const location = typeof offer.location === 'string' ? sanitizeMarkdownField(offer.location) : '';
   const compensation = formatCompensation(offer.salary);
   const base = `- [ ] ${url} | ${company} | ${title}`;
-  if (compensation) return `${base} | ${location} | ${compensation}`;
-  return location ? `${base} | ${location}` : base;
+  let line = base;
+  if (compensation) line = `${base} | ${location} | ${compensation}`;
+  else if (location) line = `${base} | ${location}`;
+  // Optional labeled posting-date segment (like note:) — keeps the positional
+  // 1/3/4/5-column contract in modes/pipeline.md intact.
+  const posted = postedAtIsoDate(offer.postedAt);
+  if (posted) line = `${line} | posted: ${posted}`;
+  // Optional free-text ranking signal (e.g. a curated-list flag an importer
+  // attaches). Labeled — not positional like location/compensation — so it can
+  // ride on any row shape (bare URL, 3-, 4-, or 5-column) without a reader
+  // confusing it for a positional cell, and it stays generic: nothing here is
+  // source-specific, and an offer without `note` produces byte-identical output.
+  const note = typeof offer.note === 'string' ? sanitizeMarkdownField(offer.note) : '';
+  return note ? `${line} | note: ${note}` : line;
 }
 
+// postedAt arrives as epoch ms (or absent). Convert to 'YYYY-MM-DD', or '' when missing.
+function postedAtIsoDate(postedAt) {
+  if (typeof postedAt !== 'number' || !Number.isFinite(postedAt) || postedAt <= 0) return '';
+  return new Date(postedAt).toISOString().slice(0, 10);
+}
 export function formatScanHistoryRow(offer, date, status = 'added') {
   return [
     normalizeScanUrl(offer.url),
@@ -650,7 +695,39 @@ export function formatScanHistoryRow(offer, date, status = 'added') {
     offer.company,
     status,
     offer.location || '',
+    // JD-content fingerprint (#1597): 16 hex chars when the provider's list
+    // API shipped a usable description, '' otherwise. Lets later scans flag
+    // the same body re-posted under a different company (agency cross-listing)
+    // without storing the body. All readers tolerate the extra column.
+    offer.fingerprint ?? fingerprintText(offer.description),
+    // New trailing column: posting date. Existing readers index by position up to
+    // col 7, so appending col 8 is backward-compatible.
+    postedAtIsoDate(offer.postedAt),
   ].map(sanitizeTsvField).join('\t');
+}
+
+/**
+ * Read scan-history.tsv rows that carry a fingerprint, for the cross-listing
+ * check. Older rows without the 8th column simply never match.
+ *
+ * @param {string} [historyPath] - Override for tests.
+ * @returns {Array<{url: string, dateStr: string, company: string, title: string, fingerprint: string}>}
+ */
+export function loadFingerprintHistory(historyPath = SCAN_HISTORY_PATH) {
+  if (!existsSync(historyPath)) return [];
+  const rows = [];
+  for (const line of readFileSync(historyPath, 'utf-8').split('\n')) {
+    const cols = line.split('\t');
+    if (cols.length < 8 || !cols[7].trim()) continue;
+    rows.push({
+      url: (cols[0] || '').trim(),
+      dateStr: (cols[1] || '').trim(),
+      title: (cols[3] || '').trim(),
+      company: (cols[4] || '').trim(),
+      fingerprint: cols[7].trim(),
+    });
+  }
+  return rows;
 }
 
 // Standard skeleton created on fresh install — matches the format documented
@@ -717,6 +794,28 @@ export function appendToScanHistory(offers, date, status = 'added') {
   const lines = offers.map(o => formatScanHistoryRow(o, date, status)).join('\n') + '\n';
 
   appendFileSync(SCAN_HISTORY_PATH, lines, 'utf-8');
+}
+
+// ── Scan-run persistence (#1604) ────────────────────────────────────
+
+const SCAN_RUNS_PATH = 'data/scan-runs.tsv';
+
+// One row of run counters per non-dry scan — today these numbers are printed
+// once in the summary and lost when the terminal scrolls. Full ISO timestamp
+// (two scans in one day must not collapse). `status` is reserved: always
+// 'completed' in v1; a follow-up wires failure-path writes so trend stats can
+// exclude survivorship bias. Consumers MUST parse by header name, never by
+// position — columns may be appended in later versions.
+export const SCAN_RUNS_HEADER = 'timestamp\tstatus\tcompanies\tboards\tfound\tfiltered_title\tfiltered_tier\tfiltered_location\tfiltered_posting_age\tfiltered_salary\tfiltered_content\tfiltered_cooldown\tdupes\tnew_added\terrors\n';
+
+export function appendScanRunSummary(c, filePath = SCAN_RUNS_PATH) {
+  if (!existsSync(filePath)) writeFileSync(filePath, SCAN_RUNS_HEADER, 'utf-8');
+  const row = [
+    c.timestamp, c.status ?? 'completed', c.companies, c.boards, c.found,
+    c.filteredTitle, c.filteredTier, c.filteredLocation, c.filteredPostingAge,
+    c.filteredSalary, c.filteredContent, c.filteredCooldown, c.dupes, c.newAdded, c.errors,
+  ].join('\t') + '\n';
+  appendFileSync(filePath, row, 'utf-8');
 }
 
 // ── Parallel fetch with concurrency limit ───────────────────────────
@@ -907,7 +1006,19 @@ async function main() {
   const companies = Array.isArray(config.tracked_companies) ? config.tracked_companies : [];
   const boards = Array.isArray(config.job_boards) ? config.job_boards : [];
   const titleFilter = buildTitleFilter(config.title_filter);
+
+  // Seniority tier classifier integration
+  let classifyTier = null;
+  const skipTiers = Array.isArray(config.skip_tiers)
+    ? config.skip_tiers.filter(t => typeof t === 'string').map(t => t.toLowerCase())
+    : [];
+  if (skipTiers.length > 0) {
+    const mod = await import('./classify-tier.mjs');
+    classifyTier = mod.classifyTier || mod.default;
+  }
+
   const locationFilter = buildLocationFilter(config.location_filter);
+  const postingAgeFilter = buildPostingAgeFilter(config.max_posting_age_days);
   const salaryFilter = buildSalaryFilter(config.salary_filter);
   const trustValidator = buildTrustValidator(config.trust_filter);
   const contentFilter = buildContentFilter(config.content_filter);
@@ -934,7 +1045,7 @@ async function main() {
         continue;
       }
       if (filterCompany && !entry.name.toLowerCase().includes(filterCompany)) continue;
-      
+
       const resolved = resolveProvider(entry, providers);
       if (!resolved) {
         skippedCount++;
@@ -947,12 +1058,12 @@ async function main() {
         }
         continue;
       }
-      
-      if (resolved.error) { 
-        resolveErrors.push({ company: entry.name, error: resolved.error }); 
-        continue; 
+
+      if (resolved.error) {
+        resolveErrors.push({ company: entry.name, error: resolved.error });
+        continue;
       }
-      
+
       targets.push({ ...entry, _provider: resolved.provider, _isBoard: isBoard });
       if (isBoard) boardCount++;
     }
@@ -984,12 +1095,15 @@ async function main() {
   const cooldownOffers = [];
   let totalFound = 0;
   let totalFilteredTitle = 0;
+  let totalFilteredTier = 0;
   let totalFilteredLocation = 0;
+  let totalFilteredPostingAge = 0;
   let totalFilteredSalary = 0;
   let totalFilteredContent = 0;
   let totalDupes = 0;
   const newOffers = [];
   const errors = [...resolveErrors];
+  const emptyTargets = [];
 
   const tasks = targets.map(company => async () => {
     let provider = company._provider;
@@ -1015,6 +1129,9 @@ async function main() {
         throw new Error(`${provider.id}: fetch() did not return an array`);
       }
       totalFound += jobs.length;
+      if (!company._isBoard && jobs.length === 0) {
+        emptyTargets.push(company.name);
+      }
 
       for (const job of jobs) {
         // Trust enrichment — runs before filters, never drops
@@ -1027,15 +1144,23 @@ async function main() {
           totalFilteredTitle++;
           continue;
         }
+        if (classifyTier && skipTiers.includes(classifyTier(job.title))) {
+          totalFilteredTier++;
+          continue;
+        }
         if (!locationFilter(job.location)) {
           totalFilteredLocation++;
+          continue;
+        }
+        if (!postingAgeFilter(job.postedAt)) {
+          totalFilteredPostingAge++;
           continue;
         }
         if (!salaryFilter(job.salary)) {
           totalFilteredSalary++;
           continue;
         }
-        if (!contentFilter(job.description)) {
+        if (!contentFilter(job.description, matchedTitleKeywords(job.title, config.title_filter))) {
           totalFilteredContent++;
           continue;
         }
@@ -1072,7 +1197,11 @@ async function main() {
         });
       }
     } catch (err) {
-      errors.push({ company: company.name, error: err.message });
+      errors.push({
+        company: company.name,
+        error: err.message,
+        kind: classifyFetchError(err),
+      });
     }
   });
 
@@ -1097,6 +1226,16 @@ async function main() {
       verifiedOffers = [...verifiedOffers, ...migratedOffers];
     }
   }
+
+  // 5.7. Cross-listing check (#1597): fingerprint each new offer's JD body and
+  // compare against recent history rows from a DIFFERENT company — the same
+  // requirements text under two names is usually an agency re-post of a direct
+  // listing (or vice versa), which URL and company+role dedup both miss.
+  // Fingerprints are computed once here and reused by appendToScanHistory.
+  for (const offer of verifiedOffers) {
+    offer.fingerprint = fingerprintText(offer.description);
+  }
+  const crossListings = findCrossListings(verifiedOffers, loadFingerprintHistory());
 
   // 6. Write results
   if (!dryRun && verifiedOffers.length > 0) {
@@ -1155,13 +1294,29 @@ async function main() {
   if (summaryBoards > 0) console.log(`Job boards scanned:    ${summaryBoards}`);
   console.log(`Total jobs found:      ${totalFound}`);
   console.log(`Filtered by title:     ${totalFilteredTitle} removed`);
+  if (skipTiers.length > 0) {
+    console.log(`Filtered by tier:      ${totalFilteredTier} removed`);
+  }
   console.log(`Filtered by location:  ${totalFilteredLocation} removed`);
+  if (config.max_posting_age_days != null || totalFilteredPostingAge > 0) {
+    console.log(`Filtered by age:       ${totalFilteredPostingAge} removed`);
+  }
   console.log(`Filtered by salary:   ${totalFilteredSalary} removed`);
   console.log(`Filtered by content:  ${totalFilteredContent} removed`);
   if (Object.keys(windows).length > 0 || totalFilteredCooldown > 0) {
     console.log(`Filtered by cooldown:  ${totalFilteredCooldown} removed`);
   }
   console.log(`Duplicates:            ${totalDupes} skipped`);
+  if (crossListings.length > 0) {
+    console.log(`\n⚠️  Possible cross-listings (same JD text, different company) — warn only, nothing was dropped:`);
+    for (const { offer, row, score } of crossListings) {
+      console.log(`  - ${offer.company} — ${offer.title}`);
+      console.log(`    ≈ ${Math.round(score * 100)}% of ${row.company} — ${row.title} (seen ${row.dateStr})`);
+      console.log(`    ${offer.url}`);
+      console.log(`    vs ${row.url}`);
+    }
+    console.log(`  If one side is an agency, apply through ONE channel only — a double submission burns both (#1596).`);
+  }
   if (historyPolicy.recheckAfterDays != null) {
     console.log(`Recheck eligible:      ${seenUrlState.recheckEligible} old scan-history URL(s)`);
   }
@@ -1204,9 +1359,26 @@ async function main() {
     }
   }
 
-  if (errors.length > 0) {
-    console.log(`\nErrors (${errors.length}):`);
-    for (const e of errors) {
+  const unreachableTargets = errors.filter((e) => e.kind === 'slug_gone');
+  const networkTargets = errors.filter((e) => e.kind === 'network');
+  const otherErrors = errors.filter((e) => e.kind !== 'slug_gone' && e.kind !== 'network');
+
+  if (unreachableTargets.length > 0) {
+    const names = unreachableTargets.map((e) => e.company).join(', ');
+    console.log(`\n⚠️  ${unreachableTargets.length} target(s) unreachable (slug?): ${names} — run: node verify-portals.mjs`);
+  }
+  if (emptyTargets.length > 0) {
+    console.log(`🟡 ${emptyTargets.length} target(s) live but empty: ${emptyTargets.join(', ')}`);
+  }
+  if (networkTargets.length > 0) {
+    console.log(`\nNetwork errors (${networkTargets.length}):`);
+    for (const e of networkTargets) {
+      console.log(`  ✗ ${e.company}: ${e.error}`);
+    }
+  }
+  if (otherErrors.length > 0) {
+    console.log(`\nErrors (${otherErrors.length}):`);
+    for (const e of otherErrors) {
       console.log(`  ✗ ${e.company}: ${e.error}`);
     }
   }
@@ -1224,6 +1396,20 @@ async function main() {
     } else {
       console.log(`\nResults saved to ${PIPELINE_PATH} and ${SCAN_HISTORY_PATH}`);
     }
+  }
+
+  // Persist this run's counters (#1604) — guarded exactly like the other
+  // writes; a --dry-run must leave no trace.
+  if (!dryRun) {
+    appendScanRunSummary({
+      timestamp: new Date().toISOString(), status: 'completed',
+      companies: summaryCompanies, boards: summaryBoards, found: totalFound,
+      filteredTitle: totalFilteredTitle, filteredTier: totalFilteredTier,
+      filteredLocation: totalFilteredLocation, filteredPostingAge: totalFilteredPostingAge,
+      filteredSalary: totalFilteredSalary,
+      filteredContent: totalFilteredContent, filteredCooldown: totalFilteredCooldown,
+      dupes: totalDupes, newAdded: verifiedOffers.length, errors: errors.length,
+    });
   }
 
   console.log(`\n→ Run /career-ops pipeline to evaluate new offers.`);
