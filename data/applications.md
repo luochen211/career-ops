@@ -1,0 +1,16 @@
+# Applications Tracker
+
+| # | Date | Company | Role | Score | Status | PDF | Report | Notes |
+|---|------|---------|------|-------|--------|-----|--------|-------|
+| 12 | 2026-07-10 | 未知公司 | 远程软件开发实习生（APP/Web方向） | 3.6/5 | Evaluated | ❌ | [12](../reports/012-unknown-company-remote-software-development-intern-app-web-2026-07-10.md) | 条件性投递：Vue/React、Node/FastAPI/Java、Flutter、小程序、订单系统和部署高度匹配；但公司主体、薪资、工时、合同与转正条件均未说明，先核实再投入。 |
+| 11 | 2026-07-04 | 未知公司 | AI 应用工程师实习生 | 4.6/5 | Evaluated | ✅ | [011](../reports/011-unknown-company-ai-application-engineer-intern-2026-07-04.md) | 强烈建议投递：本科大二在读正好匹配实习筛选；career-ops、AI/Agent/LLM 开源贡献、全栈交付和 AI coding workflow 高度贴合，面试前补 Notion/Sheets/Lark + RAG 小 demo。 |
+| 10 | 2026-07-04 | Capybara Labs | React Engineer | 3.7/5 | Evaluated | ✅ | [010](../reports/010-capybara-labs-react-engineer-2026-07-04.md) | 谨慎投递：React/TypeScript、Flutter IM、小程序、AI 编程工具匹配；核心缺口是 React Native 生产经验、RN 动效/手势/滚动优化和 App Store/Android 上架。 |
+| 9 | 2026-07-04 | 未知外资企业 | Agent 架构师 | 4.2/5 | Evaluated | ✅ | [009](../reports/009-unknown-foreign-company-agent-architect-2026-07-04.md) | 值得投：AI Agent 产品工程化、全栈交付、业务效率工具和 career-ops workflow 高匹配；主要缺口是 Go/PHP 偏好、SaaS API 集成案例和架构师资深度预期。 |
+| 8 | 2026-07-02 | 未知创业团队 | 全栈工程师（Vue3 + uni-app + Java） | 4.3/5 | Evaluated | ✅ | [008](../reports/008-unknown-startup-fullstack-vue-uniapp-java-2026-07-02.md) | 值得投：小程序、Vue3、Java/Spring Boot IM、WebSocket/Netty、MySQL/Redis/Docker 匹配；AI/Agent/LLM 高星开源贡献很强，22 个仓库 117 PR + 40+ commits。 |
+| 7 | 2026-06-29 | AI Native Company | 全栈开发工程师（Agent / IM / 语音方向） | 4.5/5 | Evaluated | ✅ | [007](../reports/007-ai-native-company-2026-06-29.md) | 优先投：远程 + 全栈 + Agent + IM/语音匹配强；CNY 50-80W 有吸引力，但必须核实公司名、合同主体、付款周期、base/绩效/分红/期权口径。 |
+| 6 | 2026-06-24 | Kapibala AI Limited | 全栈工程师（语音Agent） | 3.9/5 | Evaluated | ✅ | [006](../reports/006-kapibala-ai-2026-06-24.md) | Revised after Coco/Paopao review: IM voice messages, Tencent ASR audio2Text, Agora RTC calls, WebSocket/Netty push improve fit; still missing full-duplex ASR+Agent+TTS, VAD and interruption recovery proof. |
+| 5 | 2026-06-23 | ByteDance | 豆包语音大模型后端开发实习生-Data语音 | 3.7/5 | Evaluated | ✅ | [005](../reports/005-bytedance-doubao-voice-backend-intern-2026-06-23.md) | Business-focused backend PDF generated; verify Hangzhou vs Shanghai and daily internship vs ByteIntern track before applying. |
+| 4 | 2026-06-22 | Second Me / Mindverse | AI Product Operations Intern | 4.1/5 | Evaluated | ✅ | [004](../reports/004-secondme-2026-06-22.md) | AI/Codex/社群运营匹配强，有500人学习社群、社群闭环、知识库和文章产出；仍需确认薪资地点 |
+| 2 | 2026-06-22 | DeepSeek | Agent Harness 研发工程师（全职/实习） | 4.1/5 | Evaluated | ❌ | [002](../reports/002-deepseek-agent-harness-engineer-2026-06-22.md) | Worth applying with career-ops Top 3 contributor as the lead proof point; strongest fit is engineering or internship track. |
+| 3 | 2026-06-22 | DeepSeek | Agent Harness 研究员（实习/全职） | 3.0/5 | Evaluated | ❌ | [003](../reports/003-deepseek-agent-harness-researcher-2026-06-22.md) | Researcher full-time remains a stretch due to degree/paper gaps; internship is plausible only with a career-ops eval/benchmark memo. |
+| 1 | 2026-06-13 | Unknown Company | 后端研发工程师（开发者生态方向） | 3.6/5 | Evaluated | ❌ | [001](../reports/001-unknown-company-2026-06-13.md) | Stretch AI platform backend role; worth applying only with CV reframing and a small LLM gateway demo. |
