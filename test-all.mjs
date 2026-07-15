@@ -456,8 +456,106 @@ try {
   // pages script the goto/evaluate calls so we can exercise the wrapper without
   // launching a browser. checkUrlLiveness reads body text first, apply controls
   // second — the fake returns them in that order.
-  const { checkUrlLivenessWithFallback, isChallengeResult, jitteredDelayMs } =
+  const {
+    checkUrlLivenessWithFallback,
+    createResolvedRequestGuard,
+    installSafeRequestInterception,
+    isChallengeResult,
+    jitteredDelayMs,
+    newLivenessPage,
+    rejectPrivateOrInvalid,
+  } =
     await import(pathToFileURL(join(ROOT, 'liveness-browser.mjs')).href);
+
+  const interceptEvents = [];
+  const interceptedPage = { guarded: true };
+  const cdpSession = {
+    on(event, _handler) {
+      interceptEvents.push(`on:${event}`);
+    },
+    async send(method) {
+      interceptEvents.push(`send:${method}`);
+    },
+  };
+  const guardedContext = {
+    async newPage() {
+      interceptEvents.push('newPage');
+      return interceptedPage;
+    },
+    async newCDPSession(page) {
+      interceptEvents.push(page === interceptedPage ? 'newCDPSession' : 'wrongPage');
+      return cdpSession;
+    },
+  };
+  const guardedPage = await newLivenessPage({
+    async newContext() {
+      interceptEvents.push('newContext');
+      return guardedContext;
+    },
+  });
+  if (guardedPage.guarded
+      && interceptEvents.join(',') === 'newContext,newPage,newCDPSession,on:Fetch.requestPaused,send:Fetch.enable') {
+    pass('Liveness pages install request-stage interception before navigation');
+  } else {
+    fail(`Liveness request interception order is unsafe: ${interceptEvents.join(',')}`);
+  }
+
+  const interceptAction = async (url, guard) => {
+    let action = '';
+    let handler;
+    const session = {
+      on(_event, customHandler) { handler = customHandler; },
+      async send(method, params) {
+        action = method === 'Fetch.failRequest'
+          ? `fail:${params.errorReason}`
+          : method === 'Fetch.continueRequest' ? 'continue' : action;
+      },
+    };
+    const context = { async newCDPSession() { return session; } };
+    await installSafeRequestInterception(context, {}, guard);
+    await handler({
+      requestId: 'request-1',
+      request: { url },
+    });
+    return action;
+  };
+  const blockedRedirect = await interceptAction('http://169.254.169.254/latest/meta-data/', rejectPrivateOrInvalid);
+  const allowedRequest = await interceptAction('https://jobs.example.com/role', rejectPrivateOrInvalid);
+  const failedClosed = await interceptAction('https://jobs.example.com/role', async () => {
+    throw new Error('guard lookup failed');
+  });
+  const dnsPrivate = await interceptAction(
+    'https://public-looking.example/role',
+    createResolvedRequestGuard({
+      lookupFn: async () => [{ address: '10.0.0.9', family: 4 }],
+      cacheTtlMs: 1_000,
+    }),
+  );
+  const dnsPublic = await interceptAction(
+    'https://public-looking.example/role',
+    createResolvedRequestGuard({
+      lookupFn: async () => [{ address: '8.8.8.8', family: 4 }],
+      cacheTtlMs: 1_000,
+    }),
+  );
+  if (blockedRedirect === 'fail:BlockedByClient' && allowedRequest === 'continue'
+      && failedClosed === 'fail:BlockedByClient' && dnsPrivate === 'fail:BlockedByClient'
+      && dnsPublic === 'continue') {
+    pass('CDP request guard blocks restricted redirects, private DNS, and guard failures');
+  } else {
+    fail(`CDP request guard actions wrong: blocked=${blockedRedirect}, allowed=${allowedRequest}, failed=${failedClosed}, dnsPrivate=${dnsPrivate}, dnsPublic=${dnsPublic}`);
+  }
+
+  const upskillSource = readFile('upskill.mjs');
+  const browserExtractSource = readFile('browser-extract.mjs');
+  if (upskillSource.includes('const requestGuard = createResolvedRequestGuard()')
+      && upskillSource.includes('installSafeRequestInterception(context, page, requestGuard)')
+      && !upskillSource.includes("page.on('framenavigated'")
+      && browserExtractSource.includes('installSafeRequestInterception(context, page)')) {
+    pass('JD extraction paths validate requests before redirects connect');
+  } else {
+    fail('a JD extraction path still lacks pre-navigation request validation');
+  }
 
   const disabled = jitteredDelayMs(0) === 0 && jitteredDelayMs(-1) === 0;
   let inRange = true;
@@ -543,9 +641,6 @@ try {
   // matched literal IPv4 patterns and bracketless IPv6, so several Chromium-
   // routable bypasses (0.0.0.0, [::], [::1] (bracketed), [::ffff:127.0.0.1],
   // localhost.) slipped through. These cases keep that regression covered.
-  const { rejectPrivateOrInvalid } = await import(
-    pathToFileURL(join(ROOT, 'liveness-browser.mjs')).href
-  );
   const blockCases = [
     ['http://0.0.0.0/admin', 'IPv4 all-zeros (Linux routes to loopback)'],
     ['http://[::]/', 'IPv6 all-zeros (Linux routes to loopback)'],
@@ -554,7 +649,9 @@ try {
     ['http://[::ffff:7f00:1]/', 'IPv4-mapped IPv6 loopback (hex form)'],
     ['http://[::ffff:169.254.169.254]/', 'IPv4-mapped IPv6 link-local (cloud metadata)'],
     ['http://[fc00::1]/', 'IPv6 ULA (private)'],
+    ['http://[fd00::1]/', 'IPv6 ULA (private, fd00 half)'],
     ['http://[fe80::1]/', 'IPv6 link-local'],
+    ['http://[fe90::1]/', 'IPv6 link-local beyond fe80::/16'],
     ['http://localhost./', 'FQDN-trailing-dot localhost'],
     ['http://localhost.localdomain/', 'localhost.localdomain alias'],
     ['http://169.254.169.254/latest/meta-data/', 'cloud metadata IPv4 link-local'],

@@ -6,6 +6,8 @@
  */
 
 import { classifyLiveness } from './liveness-core.mjs';
+import { lookup as dnsLookup } from 'node:dns/promises';
+import { isIP } from 'node:net';
 
 const NAVIGATE_TIMEOUT_MS = 15_000;
 const HYDRATION_WAIT_MS = 2_000;
@@ -19,13 +21,16 @@ export const LIVENESS_CONTEXT_OPTIONS = {
   userAgent:
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
   locale: 'en-US',
+  serviceWorkers: 'block',
 };
 
 // Open a page in a context that already presents a realistic UA. Both callers use
 // this instead of browser.newPage() so headless checks aren't instantly bot-walled.
 export async function newLivenessPage(browser) {
   const context = await browser.newContext(LIVENESS_CONTEXT_OPTIONS);
-  return context.newPage();
+  const page = await context.newPage();
+  await installSafeRequestInterception(context, page);
+  return page;
 }
 
 export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -67,8 +72,8 @@ const PRIVATE_HOST_PATTERNS = [
   /^169\.254\./,
   /^::1$/,
   /^::$/,
-  /^fc[0-9a-f]{2}:/,
-  /^fe80:/,
+  /^f[cd][0-9a-f]{2}:/,
+  /^fe[89ab][0-9a-f]:/,
 ];
 
 // Lowercase, strip IPv6 brackets, strip FQDN trailing dot. The `hostname`
@@ -123,6 +128,94 @@ export function rejectPrivateOrInvalid(url) {
     }
   }
   return null;
+}
+
+/**
+ * Evaluate one Chromium Fetch.requestPaused event before the browser connects.
+ * Guard failures are blocked as well: a DNS/validation error must not silently
+ * open the request.
+ */
+export async function interceptRequestWithGuard(session, event, guard = rejectPrivateOrInvalid) {
+  let verdict;
+  try {
+    verdict = await guard(event.request.url, event.request);
+  } catch (err) {
+    verdict = { code: 'guard_error', reason: err.message };
+  }
+
+  if (verdict) {
+    await session.send('Fetch.failRequest', {
+      requestId: event.requestId,
+      errorReason: 'BlockedByClient',
+    });
+    return { blocked: true, verdict };
+  }
+  await session.send('Fetch.continueRequest', { requestId: event.requestId });
+  return { blocked: false, verdict: null };
+}
+
+/**
+ * Build a URL guard that rejects hosts resolving into restricted address space.
+ * The per-context cache avoids repeating DNS work for every asset while keeping
+ * results short-lived across a long scanner run.
+ */
+export function createResolvedRequestGuard({ lookupFn = dnsLookup, cacheTtlMs = 30_000 } = {}) {
+  const cache = new Map();
+  return async (url) => {
+    const directVerdict = rejectPrivateOrInvalid(url);
+    if (directVerdict) return directVerdict;
+
+    const parsed = new URL(url);
+    const host = normalizeHost(parsed.hostname);
+    if (isIP(host)) return null;
+
+    const now = Date.now();
+    let cached = cache.get(host);
+    if (!cached || cached.expiresAt <= now) {
+      const verdictPromise = (async () => {
+        let addresses;
+        try {
+          addresses = await lookupFn(host, { all: true, verbatim: true });
+        } catch (err) {
+          return { code: 'dns_lookup_failed', reason: `DNS guard failed for ${host}: ${err.message}` };
+        }
+        if (!Array.isArray(addresses) || addresses.length === 0) {
+          return { code: 'dns_lookup_failed', reason: `DNS guard returned no addresses for ${host}` };
+        }
+        for (const entry of addresses) {
+          const address = typeof entry === 'string' ? entry : entry?.address;
+          if (!address) {
+            return { code: 'dns_lookup_failed', reason: `DNS guard returned an invalid address for ${host}` };
+          }
+          const hostLiteral = address.includes(':') ? `[${address}]` : address;
+          const addressVerdict = rejectPrivateOrInvalid(`http://${hostLiteral}/`);
+          if (addressVerdict) {
+            return { code: 'blocked_host', reason: `${host} resolves to restricted address ${address}` };
+          }
+        }
+        return null;
+      })();
+      cached = { expiresAt: now + cacheTtlMs, verdictPromise };
+      cache.set(host, cached);
+    }
+    return cached.verdictPromise;
+  };
+}
+
+/**
+ * Install request-stage CDP interception before navigation. Playwright route()
+ * handlers are not re-run for server redirect hops after route.continue(), so
+ * they cannot enforce this policy on 30x destinations. Chromium Fetch events
+ * pause every hop before network access, including redirects and subresources.
+ */
+export async function installSafeRequestInterception(context, page, guard = createResolvedRequestGuard()) {
+  const session = await context.newCDPSession(page);
+  session.on('Fetch.requestPaused', (event) =>
+    interceptRequestWithGuard(session, event, guard).catch(() => {}));
+  await session.send('Fetch.enable', {
+    patterns: [{ urlPattern: '*', requestStage: 'Request' }],
+  });
+  return session;
 }
 
 export async function checkUrlLiveness(page, url, { extraSettleMs = 0 } = {}) {
@@ -208,8 +301,7 @@ export function createHeadedPageProvider(chromium) {
       if (launchFailed) return null;
       try {
         browser = await chromium.launch({ headless: false });
-        const context = await browser.newContext(LIVENESS_CONTEXT_OPTIONS);
-        page = await context.newPage();
+        page = await newLivenessPage(browser);
         return page;
       } catch {
         launchFailed = true;

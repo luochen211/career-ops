@@ -27,6 +27,9 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { load as yamlLoad } from 'js-yaml';
 import { resolveColumns, parseTrackerRow } from './tracker-parse.mjs';
+import {
+  createResolvedRequestGuard, installSafeRequestInterception,
+} from './liveness-browser.mjs';
 
 const CAREER_OPS = dirname(fileURLToPath(import.meta.url));
 const APPS_FILE = existsSync(join(CAREER_OPS, 'data/applications.md'))
@@ -532,27 +535,10 @@ const urlTextIdx = args.indexOf('--url-text');
 const directUrl = args.find(arg => arg.startsWith('http://') || arg.startsWith('https://'));
 
 // Helper function to enforce egress guard against SSRF (Private/Loopback IPs)
-async function validateUrlSecurity(urlString) {
-  const dns = await import('dns/promises');
-  const url = new URL(urlString.endsWith('.') ? urlString.slice(0, -1) : urlString);
-  const hostname = url.hostname;
-
-  if (hostname === 'localhost' || hostname.endsWith('.local')) {
-    throw new Error('Access denied: Localhost or internal domain target detected.');
-  }
-
-  const addresses = await dns.resolve(hostname).catch(() => []);
-  const lookupRes = await dns.lookup(hostname).catch(() => null);
-  if (lookupRes) addresses.push(lookupRes.address);
-
-  for (const ip of addresses) {
-    if (/^(127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|169\.254\.)/.test(ip)) {
-      throw new Error(`Access denied: Egress guard blocked private target IP ${ip}`);
-    }
-    if (ip === '::1' || ip.startsWith('fe80:') || ip.startsWith('fc00:') || ip.startsWith('fd00:')) {
-      throw new Error(`Access denied: Egress guard blocked private target IPv6 ${ip}`);
-    }
-  }
+async function validateUrlSecurity(urlString, guard = createResolvedRequestGuard()) {
+  const url = new URL(urlString);
+  const verdict = await guard(url.toString());
+  if (verdict) throw new Error(`Access denied: ${verdict.reason}.`);
   return url.toString();
 }
 
@@ -569,19 +555,13 @@ if (urlTextIdx !== -1 || directUrl) {
     if (inputSource.startsWith('http://') || inputSource.startsWith('https://')) {
       let browser;
       try {
-        const secureUrl = await validateUrlSecurity(inputSource);
+        const requestGuard = createResolvedRequestGuard();
+        const secureUrl = await validateUrlSecurity(inputSource, requestGuard);
         const { chromium } = await import('playwright');
         browser = await chromium.launch({ headless: true });
-        const page = await browser.newPage();
-
-        page.on('framenavigated', async (frame) => {
-          if (frame === page.mainFrame()) {
-            await validateUrlSecurity(frame.url()).catch((err) => {
-              console.error(`Security Violation on Redirect: ${err.message}`);
-              process.exit(1);
-            });
-          }
-        });
+        const context = await browser.newContext();
+        const page = await context.newPage();
+        await installSafeRequestInterception(context, page, requestGuard);
 
         await page.goto(secureUrl, { waitUntil: 'networkidle', timeout: 30000 });
         targetText = await page.innerText('body');

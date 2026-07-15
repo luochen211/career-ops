@@ -35,7 +35,9 @@ import { readFileSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import yaml from 'js-yaml';
-import { LIVENESS_CONTEXT_OPTIONS, rejectPrivateOrInvalid } from './liveness-browser.mjs';
+import {
+  installSafeRequestInterception, LIVENESS_CONTEXT_OPTIONS, rejectPrivateOrInvalid,
+} from './liveness-browser.mjs';
 
 const CAREER_OPS = dirname(fileURLToPath(import.meta.url));
 
@@ -215,11 +217,8 @@ async function main() {
     // private/loopback/link-local or non-http(s) host. Guarding only the initial
     // URL isn't enough once we return page CONTENT: a server-side redirect could
     // otherwise steer the browser at internal infrastructure (SSRF).
-    await context.route('**/*', (route) => {
-      if (rejectPrivateOrInvalid(route.request().url())) return route.abort('blockedbyclient');
-      return route.continue();
-    });
     const page = await context.newPage();
+    await installSafeRequestInterception(context, page);
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout });
     await page.waitForTimeout(HYDRATION_WAIT_MS); // let SPAs hydrate
 
