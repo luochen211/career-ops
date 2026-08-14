@@ -3276,6 +3276,23 @@ if (
   fail('pipeline mode missing batch liveness sweep for unconfirmed entries');
 }
 
+if (
+  pipelineMode.includes('Try browser-backed Playwright/MCP extraction first') &&
+  pipelineMode.includes('After two consecutive browser attempts') &&
+  pipelineMode.includes('no browser tool is available')
+) {
+  pass('LinkedIn extraction is browser-first with bounded paste fallback (#2619)');
+} else {
+  fail('LinkedIn extraction still asks for pasted JDs before trying the browser (#2619)');
+}
+
+const cliDetector = readFile('web/src/lib/clis.ts');
+if (cliDetector.includes('path.join(home, ".opencode/bin")')) {
+  pass('web CLI detection includes Linux OpenCode default install path (#1793)');
+} else {
+  fail('web CLI detection misses ~/.opencode/bin/opencode on Linux (#1793)');
+}
+
 // --- salary tracking mode wiring (#1656 PR-2) ---
 const trackerModeDoc = readFile('modes/tracker.md');
 const patternsModeDoc = readFile('modes/patterns.md');
