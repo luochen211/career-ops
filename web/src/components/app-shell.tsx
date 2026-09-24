@@ -21,6 +21,7 @@ import { NAV_ITEMS, isActivePath } from "@/lib/nav-items";
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  const isWorkflow = pathname === "/workflow";
   return (
     <JobsProvider>
       <PipelineProvider>
@@ -61,21 +62,21 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             })}
           </nav>
 
-          <WorkerPills />
+          {!isWorkflow && <WorkerPills />}
 
           <div className="mt-auto space-y-3 pt-4">
-            <UsageMeter />
+            {!isWorkflow && <UsageMeter />}
             <div className="flex items-center justify-between px-1">
-              <span className={`${instrumentSerif.className} text-sm text-faint`}>local-first · v0</span>
+              <span className={`${instrumentSerif.className} text-sm text-faint`}>本地优先 · v0</span>
               <ThemeToggle />
             </div>
           </div>
         </aside>
         <main className="flex-1 overflow-x-hidden">{children}</main>
-        <AssistantConsole />
+        {!isWorkflow && <AssistantConsole />}
         <BackToTop />
-        <FirstScoreView />
-        <BetaBanner />
+        {!isWorkflow && <FirstScoreView />}
+        {!isWorkflow && <BetaBanner />}
       </div>
       </ExploreProvider>
       </ApplyProvider>

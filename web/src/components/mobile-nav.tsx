@@ -36,6 +36,7 @@ const STYLE = `
 
 export function MobileNav() {
   const pathname = usePathname();
+  const isWorkflow = pathname === "/workflow";
   const [open, setOpen] = useState(false);
   const panelRef = useRef<HTMLElement>(null);
   const { jobs } = useJobs();
@@ -176,13 +177,13 @@ export function MobileNav() {
         </nav>
 
         <div className="px-3">
-          <WorkerPills />
+          {!isWorkflow && <WorkerPills />}
         </div>
 
         <div className="co-msafe mt-auto space-y-3 border-t border-border px-4 pt-4">
-          <UsageMeter />
+          {!isWorkflow && <UsageMeter />}
           <div className="flex items-center justify-between">
-            <span className={`${instrumentSerif.className} text-sm text-faint`}>local-first · v0</span>
+            <span className={`${instrumentSerif.className} text-sm text-faint`}>本地优先 · v0</span>
             <ThemeToggle />
           </div>
         </div>

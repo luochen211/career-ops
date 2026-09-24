@@ -11,15 +11,15 @@ export type NavItem = {
 };
 
 export const NAV_ITEMS: NavItem[] = [
-  { href: "/", label: "Today", icon: LayoutDashboard },
-  { href: "/workflow", label: "How it works", icon: Route },
-  { href: "/explore", label: "Explore", icon: Compass, chip: "New" },
-  { href: "/pipeline", label: "Pipeline", icon: ListChecks },
-  { href: "/followups", label: "Follow-ups", icon: Send },
-  { href: "/portals", label: "Portals", icon: Radar },
-  { href: "/analytics", label: "Analytics", icon: BarChart3 },
-  { href: "/cv", label: "CV", icon: FileText },
-  { href: "/config", label: "Config", icon: Settings },
+  { href: "/", label: "今日", icon: LayoutDashboard },
+  { href: "/workflow", label: "运行流程", icon: Route },
+  { href: "/explore", label: "发现职位", icon: Compass, chip: "新" },
+  { href: "/pipeline", label: "投递管线", icon: ListChecks },
+  { href: "/followups", label: "跟进", icon: Send },
+  { href: "/portals", label: "招聘门户", icon: Radar },
+  { href: "/analytics", label: "数据分析", icon: BarChart3 },
+  { href: "/cv", label: "简历", icon: FileText },
+  { href: "/config", label: "设置", icon: Settings },
 ];
 
 export function isActivePath(href: string, pathname: string): boolean {
