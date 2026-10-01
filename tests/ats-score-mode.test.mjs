@@ -8,8 +8,8 @@
 // but it exists because this mode's lookup is the one that broke on it.
 import { pass, fail, ROOT } from './helpers.mjs';
 import { readFileSync, readdirSync } from 'fs';
-import { join } from 'path';
-import { isUnderNestedCheckout } from '../lib/mjs-files.mjs';
+import { join, relative } from 'path';
+import { isNestedCheckout } from '../lib/mjs-files.mjs';
 
 console.log('\nats-score mode (#2284)');
 
@@ -68,6 +68,20 @@ if (atsScoreLookupMissing.length === 0) {
   fail(`ats-score contributions lookup regressed: ${atsScoreLookupMissing.join('; ')}`);
 }
 
+const publicEventsFallback = atsScoreMode.slice(
+  atsScoreMode.indexOf('users/{username}/events/public'),
+  atsScoreMode.indexOf('repos/{username}', atsScoreMode.indexOf('users/{username}/events/public')),
+);
+if (
+  /only records where `type` is `PushEvent`/.test(publicEventsFallback) &&
+  /owner\.toLowerCase\(\) !== username\.toLowerCase\(\)/.test(publicEventsFallback) &&
+  /Ignore non-`PushEvent` records and pushes to repositories owned by the candidate/.test(publicEventsFallback)
+) {
+  pass('public-events fallback counts only external PushEvents using a case-insensitive repository-owner comparison');
+} else {
+  fail('public-events fallback must exclude non-PushEvents and case-insensitive self-owned repository pushes');
+}
+
 // The link-quality adjustment feeds a score, so it has to be a function, not a
 // judgement call: four mutually exclusive rows with fixed multipliers. A range
 // ("0.5 to 0.7") means identical evidence can produce different totals.
@@ -123,12 +137,24 @@ if (
 // explicit `-X GET` (or `-X POST`, should a write ever be intended) is fine.
 const ghApiFieldRe = /\bgh api\b[^\n`]*/g;
 const ghApiPostByAccident = [];
-// `{ recursive: true }` descends on Node's side, so there is no per-directory
-// decision to guard — a checkout under modes/ is filtered out of the RESULT
-// instead, or that other tree's modes get scanned as if they were ours (#3762).
-const modeDocs = readdirSync(join(ROOT, 'modes'), { recursive: true })
-  .filter((p) => typeof p === 'string' && p.endsWith('.md'))
-  .filter((p) => !isUnderNestedCheckout(join(ROOT, 'modes'), p));
+// Walk explicitly: readdirSync's recursive option was added after the repo's
+// minimum supported Node 18. Use Dirent entries (available throughout Node 18)
+// and skip nested checkouts before descending into them.
+const modeRoot = join(ROOT, 'modes');
+const modeDocs = [];
+const walkModeDocs = (dir) => {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.isSymbolicLink()) continue;
+    const fullPath = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (!isNestedCheckout(fullPath)) walkModeDocs(fullPath);
+    } else if (entry.isFile() && entry.name.endsWith('.md')) {
+      modeDocs.push(relative(modeRoot, fullPath));
+    }
+  }
+};
+walkModeDocs(modeRoot);
+modeDocs.sort();
 for (const f of modeDocs) {
   const rel = `modes/${f.split(/[\\/]/).join('/')}`;
   for (const cmd of readMode(rel).match(ghApiFieldRe) ?? []) {
