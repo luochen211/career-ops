@@ -100,18 +100,24 @@
   .achievements li {
     margin-bottom: 5pt;
     padding-left: 14pt;
-    position: relative;
+    text-indent: -14pt;
   }
 
   .achievements li::before {
     content: "\2022";
-    position: absolute;
-    left: 0;
+    display: inline-block;
+    width: 14pt;
+    text-indent: 0;
   }
 
   .language-closing {
     font-style: italic;
     margin-top: 4pt;
+    margin-bottom: 8pt;
+  }
+
+  .signature {
+    margin-top: 12pt;
     margin-bottom: 8pt;
   }
 
@@ -147,6 +153,7 @@
   {{PROBLEMS_BLOCK}}
   {{CLOSING_BLOCK}}
   {{LANGUAGE_CLOSING_BLOCK}}
+  {{SIGNATURE_BLOCK}}
   {{FOOTNOTES_BLOCK}}
 </body>
 </html>
