@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { stripTypeScriptTypes } from "node:module";
 import { resolveLateSession } from "../../src/lib/apply/exit.mjs";
+import { readFillResult, screenForFill } from "../../src/lib/apply/fill-stream.mjs";
 import { isSensitiveQuestion } from "../../src/lib/apply/sensitive-questions.mjs";
 
 // Run the real provider callbacks with deterministic hooks and transport. The
@@ -12,7 +13,7 @@ const source = readFileSync(new URL("../../src/components/apply/apply-provider.t
   .replace(/export /g, "")
   .replace("return <Ctx.Provider value={value}>{children}</Ctx.Provider>;", "return value;");
 const createProvider = new Function(
-  "hooks", "fetch", "localStorage", "resolveLateSession", "isSensitiveQuestion",
+  "hooks", "fetch", "localStorage", "resolveLateSession", "isSensitiveQuestion", "readFillResult", "screenForFill",
   `const {createContext,useCallback,useContext,useEffect,useMemo,useRef,useState}=hooks;\n${stripTypeScriptTypes(source)}\nreturn ApplyProvider;`,
 );
 
@@ -37,7 +38,7 @@ function harness(prefillResponse, failedField = null) {
       return [slots[index], (next) => { slots[index] = typeof next === "function" ? next(slots[index]) : next; }];
     },
   };
-  const fields = [{ id: "salary", label: "Expected salary", type: "text" }, { id: "why", label: "Why this role?", type: "text" }];
+  const fields = [{ id: "salary", label: "Expected salary", type: "text" }, { id: "visa", label: "Visa sponsorship", type: "text" }, { id: "why", label: "Why this role?", type: "text" }];
   const fetch = async (url, options) => {
     const body = JSON.parse(options.body);
     requests.push({ url, body });
@@ -47,7 +48,7 @@ function harness(prefillResponse, failedField = null) {
     if (url.endsWith("/drive")) return new Response('{"t":"done","filled":false}\n');
     throw new Error(`unexpected request: ${url}`);
   };
-  const Provider = createProvider(hooks, fetch, { getItem: () => '{"cliId":"fixture"}' }, resolveLateSession, isSensitiveQuestion);
+  const Provider = createProvider(hooks, fetch, { getItem: () => '{"cliId":"fixture"}' }, resolveLateSession, isSensitiveQuestion, readFillResult, screenForFill);
   const render = () => { cursor = 0; return Provider({ children: null }); };
   return { render, requests };
 }
@@ -71,15 +72,15 @@ for (const [name, response] of [
   });
 }
 
-test("successful planner replacement revokes the previous human confirmation", async () => {
+test("successful planner refresh preserves the human salary answer", async () => {
   const h = harness(() => new Response('{"t":"done","count":1,"answers":{"salary":{"value":"","needs_confirmation":true}}}\n'));
   await h.render().open("https://example.test/apply");
   h.render().setHumanAnswer("salary", "120000");
   await h.render().prefill();
   await h.render().fill();
   const sent = h.requests.find((request) => request.url.endsWith("/fill")).body;
-  assert.deepEqual(sent.confirmedSensitiveFieldIds, []);
-  assert.equal(sent.answers.salary, "");
+  assert.deepEqual(sent.confirmedSensitiveFieldIds, ["salary"]);
+  assert.equal(sent.answers.salary, "120000");
 });
 
 test("a failed sensitive locator asks for manual completion without agent escalation", async () => {
@@ -99,4 +100,35 @@ test("an ordinary failed locator still escalates without sharing the personal an
   await h.render().fill();
   const sent = h.requests.find((request) => request.url.endsWith("/drive")).body;
   assert.deepEqual(sent.answers, [{ fieldId: "why", value: "Relevant experience" }]);
+});
+
+for (const id of ["salary", "visa"]) {
+  test(`assistant edits cannot replace a human ${id} answer`, async () => {
+    const h = harness(() => new Response(""));
+    await h.render().open("https://example.test/apply");
+    h.render().setHumanAnswer(id, "Human answer");
+    h.render().setAnswer(id, "Invented answer");
+    assert.equal(h.render().answers[id], "Human answer");
+    await h.render().fill();
+    const sent = h.requests.find((request) => request.url.endsWith("/fill")).body;
+    assert.ok(sent.confirmedSensitiveFieldIds.includes(id));
+  });
+}
+
+test("planner completion preserves sensitive edits made while its request is pending", async () => {
+  let finish;
+  const pending = new Promise((resolve) => { finish = resolve; });
+  const h = harness(() => pending);
+  await h.render().open("https://example.test/apply");
+  const prefilling = h.render().prefill();
+  h.render().setHumanAnswer("visa", "Human visa answer");
+  h.render().setHumanAnswer("salary", "120000");
+  h.render();
+  finish(new Response('{"t":"done","count":2,"answers":{"visa":{"value":"Invented"},"salary":{"value":"Invented"}}}\n'));
+  await prefilling;
+  assert.equal(h.render().answers.visa, "Human visa answer");
+  assert.equal(h.render().answers.salary, "120000");
+  await h.render().fill();
+  const sent = h.requests.find((request) => request.url.endsWith("/fill")).body;
+  assert.deepEqual(sent.confirmedSensitiveFieldIds.sort(), ["salary", "visa"]);
 });

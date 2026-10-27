@@ -1,5 +1,6 @@
 import { fillSession, handoffSession, getSession } from "@/lib/apply/session";
-import { resolveTailoredCv, companyFromTitle } from "@/lib/apply/cv";
+import { resolveSessionCv } from "@/lib/apply/cv";
+import { readJsonObject } from "@/lib/json-body";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -9,12 +10,8 @@ export const maxDuration = 120;
 // each step for the "behind the scenes" strip, then bring the window to the front
 // so the HUMAN reviews and submits. NEVER submits — there is no submit path here.
 export async function POST(req: Request) {
-  let body: { sessionId?: string; answers?: Record<string, string>; confirmedSensitiveFieldIds?: string[]; handoff?: boolean; company?: string; application?: string };
-  try {
-    body = await req.json();
-  } catch {
-    return Response.json({ error: "bad json" }, { status: 400 });
-  }
+  const body = await readJsonObject<{ sessionId?: string; answers?: Record<string, string>; confirmedSensitiveFieldIds?: string[]; handoff?: boolean; company?: string; application?: string }>(req);
+  if (!body) return Response.json({ error: "bad json" }, { status: 400 });
   const { sessionId, answers = {}, confirmedSensitiveFieldIds = [], handoff, company, application } = body;
   if (!sessionId) return Response.json({ error: "sessionId required" }, { status: 400 });
   if (company !== undefined && typeof company !== "string") {
@@ -32,7 +29,7 @@ export async function POST(req: Request) {
 
   // Resolve the tailored CV server-side (never trust a client path): by the
   // offer's company if known, else best-effort from the form title.
-  const cvPath = (await resolveTailoredCv(company, application)) ?? (application ? null : await resolveTailoredCv(companyFromTitle(session?.title))) ?? undefined;
+  const cvPath = (await resolveSessionCv({ company, application, title: session?.title })) ?? undefined;
 
   try {
     const result = await fillSession(sessionId, answers, { confirmedSensitiveFieldIds, cvPath });
