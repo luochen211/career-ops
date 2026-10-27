@@ -2,6 +2,12 @@
 
 當求職者輸入職缺描述（JD 文字或 URL 連結）時，**一律**輸出以下七個維度的深度評估結果（A–F 評估 ＋ G 真實性）：
 
+## 職缺有效性檢查（URL 輸入）
+
+在維度 A 前完整執行 `modes/oferta.md` 的 **Liveness gate (URL inputs)**，包括優先遵守 `AGENTS.md` 的 LinkedIn JD loading guard、重用既有快照及檢查 iframe。頁面無法讀取、內容不足或弱訊號不能證明職缺已關閉；嘗試其他來源或請求職者提供 JD，記錄保持待處理。
+
+僅在確認關閉時，停止於維度 A 之前，獨立一行輸出 `---DEAD_POSTING---` 並告知求職者；來自 pipeline 的記錄標記為 `- [x] ~~Company | Role~~ — oferta nieaktywna`。不產生評估、報告或履歷。批次評估器將標記視為驗證請求而非關閉證據；只有獨立且確定的檢查回傳具關閉證據的 `expired` 才能完成記錄，`insufficient_content` 仍不確定。有效、不確定或失敗的檢查保持待處理，僅含 URL 的記錄保留原連結。僅依英文真源列出的明確關閉代碼使快取失效；`expired_body_soft` 仍不確定。沒有 URL 的 JD 文字註明無法檢查後繼續。
+
 ## 步驟 0 — 職缺原型辨識
 
 將該職缺歸類為 6 種原型之一（參見 `_shared.md`）。若為混合型，標明最接近的 2 種。這會決定：

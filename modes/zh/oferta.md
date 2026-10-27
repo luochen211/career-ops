@@ -2,6 +2,12 @@
 
 当候选人输入职位描述（JD文本或URL链接）时，**始终**输出以下七个维度的深度评估结果（A-F 评估 + G 真实性）：
 
+## 职位有效性检查（URL 输入）
+
+在维度 A 前完整执行 `modes/oferta.md` 的 **Liveness gate (URL inputs)**，包括优先遵守 `AGENTS.md` 的 LinkedIn JD loading guard、复用已有快照和检查 iframe。页面无法读取、内容不足或弱信号不能证明职位已关闭；尝试其他来源或请候选人提供 JD，记录保持待处理。
+
+仅在确认关闭时，停止于维度 A 之前，单独一行输出 `---DEAD_POSTING---` 并告知候选人；来自 pipeline 的记录标记为 `- [x] ~~Company | Role~~ — oferta nieaktywna`。不生成评估、报告或简历。批量评估器将标记视为验证请求而非关闭证据；只有独立且确定的检查返回有关闭证据的 `expired` 才能完成记录，`insufficient_content` 仍不确定。活跃、不确定或失败的检查保持待处理，仅含 URL 的记录保留原链接。仅按英文真源列出的明确关闭代码使缓存失效；`expired_body_soft` 仍不确定。没有 URL 的 JD 文本注明无法检查后继续。
+
 ## 步骤 0 — 岗位画像识别
 将该职位划分为 6 种画像之一（参见 `_shared.md`）。如果是混合型，标明最接近的 2 种。这决定了：
 - 在维度 B 中优先匹配哪些量化佐证（Proof points）。
