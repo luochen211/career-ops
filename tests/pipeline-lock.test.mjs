@@ -22,8 +22,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync, readFileSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
-import { Worker } from 'node:worker_threads';
+import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { tryAcquireDirLockSync } from '../lib/dir-lock.mjs';
 import {
@@ -57,60 +56,6 @@ function churnLock(lockDir, everyMs) {
     handoffs: () => handoffs,
     stop() {
       clearInterval(timer);
-      rmSync(lockDir, { recursive: true, force: true });
-    },
-  };
-}
-
-// churnLock's handoffs, made on a worker thread's own event loop. A test whose
-// subject is the extension rule needs a holder that keeps making progress even
-// when the main thread stalls. The in-process timer above cannot promise that:
-// a stall keeps it from firing between the two fingerprint samples the wait
-// policy compares, the lock then reads as wedged, and the caller gives up early.
-// Real holders are other processes, so this is the closer model.
-//
-// The directory is created once and never removed. Each handoff swaps in a new
-// owner.json by rename, retried through Windows contention. A rename is atomic,
-// so the waiter never sees a free lock.
-// A remove-then-create swap would leave a gap another thread can slip through.
-// Resolves once the first owner is on disk; stop() is async because it ends the
-// worker.
-async function churnLockInWorker(lockDir, everyMs) {
-  const worker = new Worker(`
-    const { mkdirSync, writeFileSync } = require('node:fs');
-    const { join } = require('node:path');
-    const { workerData, parentPort } = require('node:worker_threads');
-    (async () => {
-      const { renameSyncWithRetry } = await import(workerData.trackerUtilsUrl);
-      const owner = join(workerData.lockDir, 'owner.json');
-      const staged = join(workerData.lockDir, 'owner.json.next');
-      let handoffs = 0;
-      const stamp = () => JSON.stringify({
-        pid: process.pid, token: 'handoff-' + handoffs++, started_at: new Date().toISOString(),
-      });
-      mkdirSync(workerData.lockDir, { recursive: true });
-      writeFileSync(owner, stamp(), 'utf-8');
-      parentPort.postMessage('ready');
-      setInterval(() => {
-        writeFileSync(staged, stamp(), 'utf-8');
-        renameSyncWithRetry(staged, owner);
-      }, workerData.everyMs);
-    })();
-  `, {
-    eval: true,
-    workerData: {
-      lockDir,
-      everyMs,
-      trackerUtilsUrl: pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), '..', 'tracker-utils.mjs')).href,
-    },
-  });
-  await new Promise((resolve, reject) => {
-    worker.once('message', resolve);
-    worker.once('error', reject);
-  });
-  return {
-    async stop() {
-      await worker.terminate();
       rmSync(lockDir, { recursive: true, force: true });
     },
   };
@@ -475,8 +420,8 @@ test('LockTimeoutError carries the live holder it was blocked by (#2834 diagnost
   }
 });
 
-// Both ceiling tests race the acquire against a wall-clock bound rather than
-// awaiting it. Against a lock that churns for ever, a broken ceiling does not
+// Real-time ceiling tests race the acquire against a wall-clock bound rather
+// than awaiting it. Against a lock that churns for ever, a broken ceiling does not
 // return at all, and a bare await would hang the suite instead of failing it.
 // The retry loop yields on every pass, so the racing timer does get to run.
 async function settleOrGiveUp(promise, ms) {
@@ -514,23 +459,46 @@ test('acquirePipelineLock: a lock that keeps changing hands does not time out a 
   }
 });
 
-test('acquirePipelineLock: extended waiting is still bounded by maxWaitMs, so endless churn cannot hang a caller', async () => {
+test('acquirePipelineLock: extended waiting is still bounded by maxWaitMs, so endless churn cannot hang a caller', async (t) => {
   const root = fixtureRoot();
-  const churn = await churnLockInWorker(`${root}/data/pipeline.md.lock`, 30);
   try {
     const p = join(root, 'data', 'pipeline.md');
-    // Progress must buy patience, never immortality: a lock handed round for
-    // ever still has to fail the caller rather than block it indefinitely.
-    const startedAt = Date.now();
+    const lockDir = `${p}.lock`;
+    mkdirSync(lockDir);
+    let now = 1_000_000;
+    let handoffs = 0;
+    const handOff = () => writeFileSync(join(lockDir, 'owner.json'), JSON.stringify({
+      pid: process.pid, token: `handoff-${handoffs++}`, started_at: new Date(now).toISOString(),
+    }));
+    handOff();
+
+    // A worker's 30ms timer cannot guarantee observable progress within a
+    // 100ms window on a loaded runner. A stalled holder may legitimately time
+    // out before maxWaitMs: it is a ceiling, not a minimum. Drive the real
+    // acquisition loop with a controlled clock and one completed handoff per
+    // retry instead, so the extension rule is actually exercised every window.
+    t.mock.method(Date, 'now', () => now);
+    t.mock.method(Math, 'random', () => 0.5);
+    const sleeps = [];
+    t.mock.method(globalThis, 'setTimeout', (callback, delay, ...args) => {
+      sleeps.push(delay);
+      // Fail finitely if the ceiling disappears, rather than hanging the
+      // suite. The correct loop needs fewer than 50 retries for this budget.
+      assert.ok(sleeps.length < 100, 'the acquisition loop ignored maxWaitMs despite continuing progress');
+      now += Math.max(1, Math.ceil(delay));
+      handOff(); // The lock stays occupied; only its owner token changes.
+      queueMicrotask(() => callback(...args));
+    });
+
+    const startedAt = now;
     await assert.rejects(
       () => acquirePipelineLock(p, { timeoutMs: 100, retryMs: 10, maxWaitMs: 400 }),
-      (err) => err instanceof LockTimeoutError,
+      (err) => err instanceof LockTimeoutError && /held > 400ms/.test(err.message),
     );
-    const elapsed = Date.now() - startedAt;
-    assert.ok(elapsed >= 400, `gave up after ${elapsed}ms, before the caller's maxWaitMs`);
-    assert.ok(elapsed < 3000, `waited ${elapsed}ms — maxWaitMs did not bound the extension`);
+    assert.equal(now - startedAt, 401, 'progress must extend waiting to the absolute ceiling, then stop');
+    assert.ok(handoffs > 5, 'the ceiling must be reached under observed handoffs');
+    assert.ok(sleeps.every((ms) => ms >= 0 && ms <= 10), 'retries must remain bounded by the jitter and deadlines');
   } finally {
-    await churn.stop();
     rmSync(root, { recursive: true, force: true });
   }
 });
