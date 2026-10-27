@@ -19,6 +19,10 @@
  * directly, with no network: no assertion reads update-system.mjs's source.
  */
 
+import fs from 'node:fs';
+import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, chmodSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -231,5 +235,50 @@ const run = (argv, { curl, git, local = '1.33.0' }) =>
     pass(`gitRemoteVersion() surfaces git's own failure reason (detail: ${JSON.stringify(String(res.detail).slice(0, 60))})`);
   } else {
     fail(`gitRemoteVersion() against a .invalid host → ${JSON.stringify(res)}`);
+  }
+}
+
+// Real curlGet callback failures must render useful labels, without changing
+// the string process-error fallback or the existing timeout mapping.
+{
+  const original = childProcess.execFile;
+  try {
+    for (const [code, expected] of [
+      [6, '6 (could not resolve host)'], [7, '7 (connection failed)'],
+      [22, '22 (HTTP error)'], [35, '35 (TLS handshake failed)'],
+      [60, '60 (TLS certificate rejected)'], [28, 'timeout (10s)'],
+      [99, '99'], ['ENOENT', 'ENOENT'],
+    ]) {
+      childProcess.execFile = (_command, _args, _options, callback) =>
+        callback(Object.assign(new Error('curl failed'), { code }), '');
+      syncBuiltinESMExports();
+      let detail;
+      assert.equal(await curlGet('https://example.invalid', [], value => { detail = value; }), null);
+      assert.equal(detail, expected);
+      pass(`curlGet renders ${code} as ${expected}`);
+    }
+  } finally {
+    childProcess.execFile = original;
+    syncBuiltinESMExports();
+  }
+}
+
+// A closed/full stderr pipe must not prevent the Git probe or its result.
+{
+  const original = fs.writeSync;
+  try {
+    for (const code of ['EAGAIN', 'EPIPE', 'EBADF']) {
+      fs.writeSync = () => { throw Object.assign(new Error('stderr unavailable'), { code }); };
+      syncBuiltinESMExports();
+      const git = fakeGit({ ok: true, version: '1.40.0' });
+      const result = await run(MAIN, { curl: fakeCurl(), git });
+      assert.equal(git.calls, 1);
+      assert.equal(result.status, 'update-available');
+      assert.equal(result.remote, '1.40.0');
+      pass(`stderr ${code} does not prevent the Git fallback result`);
+    }
+  } finally {
+    fs.writeSync = original;
+    syncBuiltinESMExports();
   }
 }

@@ -3832,7 +3832,7 @@ const CHECK_GIT_PROBE_TIMEOUT_MS = 5000;
 //
 // Resolves the body, or null on any failure. `onError` receives the failure
 // reason, so an "offline" answer can say what failed: ENOENT (curl not on
-// PATH), HTTP 403 (--fail, e.g. API rate limit), a proxy/TLS failure and a
+// PATH), HTTP error (--fail, e.g. API rate limit), a proxy/TLS failure and a
 // real outage all land there. Exported for tests: the broken-curl guard is
 // verified behaviorally by invoking this with a sabotaged PATH.
 export function curlGet(url, extraArgs = [], onError = () => {}) {
@@ -3854,7 +3854,9 @@ export function curlGet(url, extraArgs = [], onError = () => {}) {
           // Name both, or the rendered detail is a bare "28" or a tautology.
           if (error.killed) return failed(`timeout (${CHECK_CURL_BACKSTOP_MS / 1000}s)`);
           if (error.code === 28) return failed(`timeout (${CHECK_CURL_MAX_TIME_S}s)`);
-          failed(String(error.code || error.message.split('\n')[0]));
+          const labels = { 6: 'could not resolve host', 7: 'connection failed', 22: 'HTTP error', 35: 'TLS handshake failed', 60: 'TLS certificate rejected' };
+          const label = labels[error.code];
+          failed(label ? `${error.code} (${label})` : String(error.code || error.message.split('\n')[0]));
         }
       );
     } catch (error) {
@@ -4353,11 +4355,13 @@ async function checkMainChannel(local, marker, runCurlGet, localSha, runGitProbe
       // writeSync, not console.error: on Windows, stderr writes to a pipe are
       // async, and the execFileSync probe blocks the event loop — a queued
       // console.error would flush only AFTER the wait it announces.
-      writeSync(
-        process.stderr.fd,
-        `career-ops update check: GitHub unreachable over curl (VERSION: ${failed.version}; ` +
-        `releases: ${failed.releases}) — retrying over git, ≤${CHECK_GIT_PROBE_TIMEOUT_MS / 1000}s…\n`,
-      );
+      try {
+        writeSync(
+          process.stderr.fd,
+          `career-ops update check: GitHub unreachable over curl (VERSION: ${failed.version}; ` +
+          `releases: ${failed.releases}) — retrying over git, ≤${CHECK_GIT_PROBE_TIMEOUT_MS / 1000}s…\n`,
+        );
+      } catch { /* A progress notice must never abort the check. */ }
       gitProbe = runGitProbe();
       if (gitProbe.ok) remote = gitProbe.version;
     }
